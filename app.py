@@ -9,8 +9,6 @@ import aiohttp
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
-from websockets.asyncio.server import serve
-
 # WebSocket client handler function (with path handling)
 async def handle_client(websocket, path):
     print(f"Connection established on path: {path}")  # Log the path
@@ -70,10 +68,10 @@ if __name__ == "__main__":
     # Start HTTP server in a thread for health check
     threading.Thread(target=run_http_server, args=(port,), daemon=True).start()
 
-    # Start WebSocket server
+    # Start WebSocket server (without path argument in websockets.serve())
     async def main():
-        async with websockets.serve(handle_client, "0.0.0.0", port, path="/ws"):
-            print(f"WebSocket server started on ws://0.0.0.0:{port}/ws")
+        async with websockets.serve(handle_client, "0.0.0.0", port):
+            print(f"WebSocket server started on ws://0.0.0.0:{port}")
             await asyncio.Future()  # Keep server running indefinitely
 
     asyncio.run(main())
