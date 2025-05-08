@@ -62,7 +62,7 @@ async def send_telegram_message(message):
 if __name__ == "__main__":
     async def main():
         port = int(os.environ.get("PORT", 8080))
-        async with websockets.serve(handle_client, "localhost", 8080):
+        async with websockets.serve(handle_client, "0.0.0.0", port):
             print("Server started on ws://localhost:8080")
             await asyncio.Future()  # Run forever
 
