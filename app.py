@@ -59,7 +59,7 @@ if __name__ == "__main__":
 
     # Start WebSocket server
     async def main():
-        async with websockets.serve(handle_client, "0.0.0.0", port):
+        async with websockets.serve(handle_client, "0.0.0.0", port, path="/ws"):
             print(f"WebSocket server started on ws://0.0.0.0:{port}")
             await asyncio.Future()  # Run forever
 
