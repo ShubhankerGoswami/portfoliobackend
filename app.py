@@ -11,20 +11,33 @@ import threading
 
 from websockets.asyncio.server import serve
 
-async def handle_client(websocket):
-    async for message in websocket:
-        print(f"Received message: {message}")
-        await send_telegram_message(message)
-        response = subprocess.run(
-            [sys.executable, 't.py', message],
-            capture_output=True,
-            text=True
-        )
-        print(f"Response from subprocess: {response.stdout.strip()}")
-        response = response.stdout.strip()
-        await send_telegram_message(response)
-        await websocket.send(response)
+# WebSocket client handler function (with path handling)
+async def handle_client(websocket, path):
+    print(f"Connection established on path: {path}")  # Log the path
+    
+    # If path is correct, process the message
+    if path == "/ws":
+        async for message in websocket:
+            print(f"Received message: {message}")
+            await send_telegram_message(message)
 
+            # Call subprocess (t.py) with the message as an argument
+            response = subprocess.run(
+                [sys.executable, 't.py', message],
+                capture_output=True,
+                text=True
+            )
+            print(f"Response from subprocess: {response.stdout.strip()}")
+            response = response.stdout.strip()
+
+            # Send the response via WebSocket
+            await send_telegram_message(response)
+            await websocket.send(response)
+    else:
+        print(f"Received a connection on an invalid path: {path}")
+        await websocket.close()
+
+# Telegram message sending function
 async def send_telegram_message(message):
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -54,13 +67,13 @@ def run_http_server(port):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
 
-    # Start HTTP server in a thread
+    # Start HTTP server in a thread for health check
     threading.Thread(target=run_http_server, args=(port,), daemon=True).start()
 
     # Start WebSocket server
     async def main():
-        async with websockets.serve(handle_client, "0.0.0.0", port):
-            print(f"WebSocket server started on ws://0.0.0.0:{port}")
-            await asyncio.Future()  # Run forever
+        async with websockets.serve(handle_client, "0.0.0.0", port, path="/ws"):
+            print(f"WebSocket server started on ws://0.0.0.0:{port}/ws")
+            await asyncio.Future()  # Keep server running indefinitely
 
     asyncio.run(main())
