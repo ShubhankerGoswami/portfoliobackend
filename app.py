@@ -63,6 +63,6 @@ async def send_telegram_message(message):
 
 if __name__ == "__main__":
     nest_asyncio.apply()
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
-    # Uncomment the following line to run the HTTP server for health checks
+    #port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("app:app", host="0.0.0.0", port=10000, reload=False)
+    
