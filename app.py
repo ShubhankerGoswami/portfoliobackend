@@ -11,6 +11,10 @@ import aiohttp
 
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {"message": "Service is running!"}
+
 
 @app.get("/healthcheck")
 
@@ -63,6 +67,6 @@ async def send_telegram_message(message):
 
 if __name__ == "__main__":
     nest_asyncio.apply()
-    #port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("app:app", host="0.0.0.0", port=10000, reload=False)
-    
+    # Use the port from Render's environment variable or fallback to 10000 if not available
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
