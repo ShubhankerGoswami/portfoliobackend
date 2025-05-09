@@ -1,41 +1,51 @@
-import json
 import os
-import subprocess
 import sys
+import subprocess
 import asyncio
-import logging
-import websockets
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+import uvicorn
+import nest_asyncio
 import aiohttp
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
 
-# WebSocket client handler function (with path handling)
-async def handle_client(websocket, path):
-    print(f"Connection established on path: {path}")  # Log the path
-    
-    # If path is correct, process the message
-    if path == "/ws":
-        async for message in websocket:
-            print(f"Received message: {message}")
-            await send_telegram_message(message)
+app = FastAPI()
 
-            # Call subprocess (t.py) with the message as an argument
-            response = subprocess.run(
-                [sys.executable, 't.py', message],
-                capture_output=True,
-                text=True
-            )
-            print(f"Response from subprocess: {response.stdout.strip()}")
-            response = response.stdout.strip()
 
-            # Send the response via WebSocket
-            await send_telegram_message(response)
-            await websocket.send(response)
+@app.get("/healthcheck")
+
+async def healthcheck():
+    if os.environ.get("HEALTHCHECK") == "true":
+        return JSONResponse(content={"status": "healthy"}, status_code=200)
     else:
-        print(f"Received a connection on an invalid path: {path}")
+        return JSONResponse(content={"status": "unhealthy"}, status_code=500)
+    
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        data = await websocket.receive_text()
+        print(f"Received message: {data}")
+        await send_telegram_message(data)
+
+        response = subprocess.run(
+            [sys.executable, 't.py', data],
+            capture_output=True,
+            text=True
+        )
+
+        print(f"Response from subprocess: {response.stdout.strip()}")
+        response = response.stdout.strip()
+        await send_telegram_message(response)
+        await websocket.send_text(response)
+    except WebSocketDisconnect:
+        print("Client disconnected")
+        return
+    except Exception as e:
+        print(f"Error: {e}")
         await websocket.close()
 
-# Telegram message sending function
+
 async def send_telegram_message(message):
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -51,27 +61,8 @@ async def send_telegram_message(message):
             else:
                 print(f"Failed to send message: {response.status} - {await response.text()}")
 
-# ---- HTTP fallback server for health checks ----
-def run_http_server(port):
-    class HealthCheckHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-    httpd = HTTPServer(("", port), HealthCheckHandler)
-    httpd.serve_forever()
-
 if __name__ == "__main__":
+    nest_asyncio.apply()
     port = int(os.environ.get("PORT", 8080))
-
-    # Start HTTP server in a thread for health check
-    threading.Thread(target=run_http_server, args=(port,), daemon=True).start()
-
-    # Start WebSocket server (without path argument in websockets.serve())
-    async def main():
-        async with websockets.serve(handle_client, "0.0.0.0", port):
-            print(f"WebSocket server started on ws://0.0.0.0:{port}")
-            await asyncio.Future()  # Keep server running indefinitely
-
-    asyncio.run(main())
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+    # Uncomment the following line to run the HTTP server for health checks
