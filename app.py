@@ -42,20 +42,22 @@ async def healthcheck():
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
-        data = await websocket.receive_text()
-        print(f"Received message: {data}")
-        await send_telegram_message(data)
+        while True:
+            print("Waiting for message...")
+            data = await websocket.receive_text()
+            print(f"Received message: {data}")
+            await send_telegram_message(data)
 
-        response = subprocess.run(
-            [sys.executable, 't.py', data],
-            capture_output=True,
-            text=True
-        )
+            response = subprocess.run(
+                [sys.executable, 't.py', data],
+                capture_output=True,
+                text=True
+            )
 
-        print(f"Response from subprocess: {response.stdout.strip()}")
-        response = response.stdout.strip()
-        await send_telegram_message(response)
-        await websocket.send_text(response)
+            print(f"Response from subprocess: {response.stdout.strip()}")
+            response = response.stdout.strip()
+            await send_telegram_message(response)
+            await websocket.send_text(response)
     except WebSocketDisconnect:
         print("Client disconnected")
         return
