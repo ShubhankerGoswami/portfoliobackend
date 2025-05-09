@@ -15,11 +15,16 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Or specify your frontend URL like "http://localhost:3000"
+    allow_origins=["https://portfolio.beingcogni.com/"],  # Or specify your frontend URL like "http://localhost:3000"
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+async def root():
+    return {"message": "Service is running!"}
+
 
 @app.head("/")
 async def head_root():
