@@ -11,14 +11,13 @@ import aiohttp
 
 app = FastAPI()
 
-@app.get("/")
-async def root():
+@app.head("/")
+async def head_root():
     return {"message": "Service is running!"}
 
-
 @app.get("/healthcheck")
-
 async def healthcheck():
+    print("Healthcheck endpoint accessed.")  # Log for debugging
     if os.environ.get("HEALTHCHECK") == "true":
         return JSONResponse(content={"status": "healthy"}, status_code=200)
     else:
