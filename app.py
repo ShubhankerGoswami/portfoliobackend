@@ -71,11 +71,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 @app.websocket("/ws/voice")
-async def voice_websocket_endpoint(
-    websocket: WebSocket,
-    session_id: str = Query(default=None),
-):
+async def voice_websocket_endpoint(websocket: WebSocket):
+    session_id = websocket.query_params.get("session_id")
+
     if not session_id:
+        await websocket.accept()
         await websocket.close(code=4000, reason="session_id query param required")
         return
 
