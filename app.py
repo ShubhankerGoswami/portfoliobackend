@@ -1,17 +1,21 @@
 import os
 import sys
+import json
 import subprocess
 import asyncio
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse
 import uvicorn
 import nest_asyncio
 import aiohttp
 from fastapi.middleware.cors import CORSMiddleware
 
+from voice_agent import VoiceSessionManager
+
 
 app = FastAPI()
+voice_manager = VoiceSessionManager()
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,6 +68,91 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"Error: {e}")
         await websocket.close()
+
+
+@app.websocket("/ws/voice")
+async def voice_websocket_endpoint(
+    websocket: WebSocket,
+    session_id: str = Query(default=None),
+):
+    if not session_id:
+        await websocket.close(code=4000, reason="session_id query param required")
+        return
+
+    await websocket.accept()
+    print(f"[Voice] client connected  session={session_id[:8]}…")
+
+    session = await voice_manager.get_or_create(session_id)
+
+    async def send_json(payload: dict):
+        await websocket.send_text(json.dumps(payload))
+
+    try:
+        while True:
+            message = await websocket.receive()
+
+            # ── binary frame = raw audio from MediaRecorder ──────────────────
+            if message.get("bytes"):
+                audio_bytes = message["bytes"]
+
+                # 1. STT
+                try:
+                    transcript = await voice_manager.transcribe(audio_bytes)
+                except Exception as exc:
+                    print(f"[Voice] STT error: {exc}")
+                    await send_json({"type": "error", "stage": "stt", "message": str(exc)})
+                    continue
+
+                if not transcript:
+                    await send_json({"type": "error", "stage": "stt", "message": "Could not transcribe audio"})
+                    continue
+
+                # Send transcript so FE can display what user said
+                await send_json({"type": "transcript", "text": transcript})
+                await send_telegram_message(f"[Voice] User: {transcript}")
+
+                # 2. LLM
+                try:
+                    reply = await voice_manager.get_llm_response(session, transcript)
+                except Exception as exc:
+                    print(f"[Voice] LLM error: {exc}")
+                    await send_json({"type": "error", "stage": "llm", "message": str(exc)})
+                    continue
+
+                # Send text response so FE can display it
+                await send_json({"type": "response_text", "text": reply})
+                await send_telegram_message(f"[Voice] Bot: {reply}")
+
+                # 3. TTS
+                try:
+                    audio_mp3 = await voice_manager.synthesize(reply)
+                except Exception as exc:
+                    print(f"[Voice] TTS error: {exc}")
+                    await send_json({"type": "error", "stage": "tts", "message": str(exc)})
+                    continue
+
+                # Send audio as binary frame — FE plays it
+                await websocket.send_bytes(audio_mp3)
+
+            # ── text frame — optional ping / control messages ─────────────────
+            elif message.get("text"):
+                try:
+                    ctrl = json.loads(message["text"])
+                    if ctrl.get("type") == "ping":
+                        await send_json({"type": "pong"})
+                except Exception:
+                    pass  # ignore malformed text
+
+    except WebSocketDisconnect:
+        print(f"[Voice] client disconnected session={session_id[:8]}…")
+    except Exception as exc:
+        print(f"[Voice] unexpected error: {exc}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+    finally:
+        await voice_manager.purge_stale()
 
 
 async def send_telegram_message(message):
