@@ -1,6 +1,6 @@
 """
 voice_agent.py – Session-aware voice pipeline
-  STT  : ElevenLabs Scribe v1
+  STT  : OpenAI Whisper (whisper-1)
   LLM  : GPT-4o mini  (with Calendly tool calling)
   TTS  : ElevenLabs Flash v2.5
   TOOL : Calendly – get availability + create booking link
@@ -178,7 +178,7 @@ TOOLS = [
                 "properties": {
                     "days_ahead": {
                         "type": "integer",
-                        "description": "How many days ahead to check (default 7, max 14)."
+                        "description": "How many days ahead to check (default 7, max 7)."
                     }
                 },
                 "required": []
@@ -293,7 +293,7 @@ class VoiceSessionManager:
 
     async def _fetch_slots(self, event_type_uri: str, days_ahead: int) -> list[str]:
         """Return available slot start times (ISO) for the next `days_ahead` days."""
-        now      = datetime.now(timezone.utc)
+        now      = datetime.now(timezone.utc) + timedelta(minutes=2)
         end_time = now + timedelta(days=days_ahead)
         params   = {
             "event_type":  event_type_uri,
@@ -324,7 +324,7 @@ class VoiceSessionManager:
 
     # ── Tool: get_availability ────────────────────────────────────────────────
     async def get_availability(self, days_ahead: int = 7) -> str:
-        days_ahead = min(max(days_ahead, 1), 14)
+        days_ahead = min(max(days_ahead, 1), 7)
 
         if not CALENDLY_API_KEY:
             return (
@@ -353,7 +353,7 @@ class VoiceSessionManager:
                     by_day.setdefault(day_key, [])
                     if len(by_day[day_key]) < 3:
                         by_day[day_key].append(
-                            dt_ist.strftime("%-I:%M %p"))
+                            dt_ist.strftime("%I:%M %p").lstrip("0"))
                     if len(by_day) == 3:
                         break
 
@@ -419,22 +419,23 @@ class VoiceSessionManager:
             return await self.create_booking_link(args["event_type_uri"])
         return f"Unknown tool: {name}"
 
-    # ── STT — ElevenLabs Scribe v1 ────────────────────────────────────────────
+    # ── STT — OpenAI Whisper ──────────────────────────────────────────────────
     async def transcribe(self, audio_bytes: bytes,
                          content_type: str = "audio/webm") -> str:
-        url     = "https://api.elevenlabs.io/v1/speech-to-text"
-        headers = {"xi-api-key": ELEVENLABS_API_KEY}
+        url     = "https://api.openai.com/v1/audio/transcriptions"
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
         form    = aiohttp.FormData()
         form.add_field("file", audio_bytes,
                        filename="audio.webm", content_type=content_type)
-        form.add_field("model_id", "scribe_v1")
-        form.add_field("language_code", "en")
+        form.add_field("model", "whisper-1")
+        form.add_field("language", "en")
+        form.add_field("response_format", "json")
 
         async with aiohttp.ClientSession() as http:
             async with http.post(url, headers=headers, data=form) as resp:
                 if resp.status != 200:
                     raise RuntimeError(
-                        f"ElevenLabs STT {resp.status}: {await resp.text()}")
+                        f"Whisper STT {resp.status}: {await resp.text()}")
                 data = await resp.json()
                 return data.get("text", "").strip()
 
