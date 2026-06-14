@@ -5,15 +5,26 @@ voice_agent.py – Session-aware voice pipeline
   TTS  : ElevenLabs Flash v2.5
   TOOL : Calendly – get availability + create booking link
 """
+import sys
+# Force UTF-8 stdout/stderr — prevents Windows charmap UnicodeEncodeError on non-ASCII LLM output
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+
+# Sentence boundary: .!? followed by whitespace (handles streaming splits)
+_SENT_BOUND  = re.compile(r'(?<=[.!?])\s+')
+_MIN_SENT    = 12   # don't TTS fragments shorter than this (chars)
 
 # ── env ───────────────────────────────────────────────────────────────────────
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "")
@@ -33,6 +44,19 @@ SYSTEM_MESSAGE = {
         "You are Cogni, Shubhanker Goswami's AI voice assistant — intelligent, "
         "friendly, and articulate. You help portfolio visitors learn about his "
         "experience and, when they want to connect, schedule a real meeting.\n\n"
+
+        "=== MANDATORY FACT — CHECK THIS BEFORE EVERY REPLY ===\n"
+        "Shubhanker has worked at EXACTLY TWO companies in his entire career:\n"
+        "  COMPANY 1: SmartSense Consulting Solutions Pvt Ltd | AI Product Manager | Apr 2022 – Present\n"
+        "  COMPANY 2: Green Power International | Engineer | Jan 2017 – Feb 2019\n\n"
+        "Insight 360, Ostrich AI, Second Brain AI, and Foster are PRODUCTS he built "
+        "WHILE AT SmartSense. They are NOT companies. They are NOT employers.\n"
+        "WRONG — NEVER SAY: 'He worked at Insight 360' / 'His experience at Ostrich AI' / "
+        "'His roles at Insight 360, Ostrich AI, and Second Brain AI'\n"
+        "RIGHT — ALWAYS SAY: 'He built Insight 360 at SmartSense' / "
+        "'At SmartSense he led products like Insight 360, Ostrich AI, Second Brain AI, and Foster'\n"
+        "If asked how many companies he has worked at, the answer is TWO: SmartSense and Green Power International.\n"
+        "=== END MANDATORY FACT ===\n\n"
 
         "LANGUAGE RULES:\n"
         "- Always respond in English only, regardless of the language the user speaks.\n\n"
@@ -64,74 +88,78 @@ SYSTEM_MESSAGE = {
         "KNOWLEDGE BASE (SOURCE OF TRUTH — never hallucinate beyond this):\n\n"
 
         "PROFILE:\n"
-        "AI Product Manager with 4+ years of experience. Expertise in Generative AI, "
-        "RAG systems, AI Agents, and scalable AI infrastructure. Experience across "
-        "Enterprise AI, Data Infrastructure, Insurance Fraud Detection, and EdTech. "
-        "Strong focus on cost-efficient AI architectures using open-source models. "
-        "Proven ability to launch MVPs in under 3 months, drive early enterprise "
-        "adoption, and lead cross-functional teams of up to 20 members. "
-        "Hands-on AI development using tools like Claude Code.\n\n"
+        "AI Product Manager with 6+ years of total experience (4+ years in PM). "
+        "Shipped 4+ products with MVPs live in under 3 months; two PoCs converted into "
+        "signed development contracts. Expertise in Generative AI, RAG systems, AI "
+        "Agents, Voice Agents, AI Chatbots, and scalable AI infrastructure. Experience "
+        "across Enterprise AI, Data Infrastructure, Insurance Fraud Detection, and "
+        "EdTech. Strong focus on cost-efficient AI architectures using open-source "
+        "models. Proven ability to lead cross-functional teams of 20+ and manage senior "
+        "stakeholders up to CEO and founder level. AI-native builder who personally "
+        "builds production modules with Claude Code and Codex.\n\n"
 
         "EXPERIENCE:\n\n"
 
-        "Insight 360 (Enterprise RAG Platform — Client: BASF):\n"
+        "== SmartSense Consulting Solutions Pvt Ltd (Apr 2022 – Present) ==\n\n"
+
+        "Product 1 — Insight 360 (Enterprise RAG Platform, built at SmartSense):\n"
         "Launched enterprise RAG platform in 3 months. Scaled to 100+ daily active "
         "users during early adoption. Built AI agent-based architecture for "
-        "intent-driven external data retrieval. Designed multimodal document "
-        "intelligence pipeline covering OCR, layout parsing, embeddings, and "
-        "retrieval. Enabled multi-format knowledge access across enterprise documents. "
-        "Reduced manual document effort by 90%. Improved retrieval accuracy by 70% "
-        "using hybrid search combining semantic and keyword-based retrieval. "
-        "Optimised architecture using open-source LLMs to reduce dependency on paid "
-        "APIs and improve cost efficiency. Led 20-member cross-functional team across "
-        "engineering, design, and QA. Crafted product narrative and investment pitch, "
-        "secured internal funding, and enabled enterprise sales and onboarding of 5+ "
-        "clients. Recognised internally and by clients as a leading RAG-enabled "
-        "solution.\n\n"
+        "intent-driven external data retrieval, unlocking new use cases and driving "
+        "onboarding of 5+ enterprise clients. Designed multimodal customisable document "
+        "intelligence pipeline covering OCR, layout parsing, embeddings, and retrieval. "
+        "Reduced manual document effort by 90%. Ran a live A/B test of hybrid retrieval "
+        "(semantic plus keyword) against a semantic-only baseline, lifting answer "
+        "acceptance by 70%, then shipped hybrid as the default retriever. "
+        "Optimised architecture using open-source LLMs. "
+        "Led 20-member cross-functional team. Secured internal funding, enabled "
+        "enterprise sales. Earned recognition in internal and client evaluations "
+        "as a leading open-source RAG-enabled solution.\n\n"
 
-        "Ostrich AI (0 to 1 Product):\n"
+        "Product 2 — Ostrich AI (0 to 1 decentralised AI platform, built at SmartSense):\n"
         "Architected a decentralised AI infrastructure platform integrating "
-        "blockchain-based data security and distributed compute nodes to enable "
-        "secure AI and ML model deployment. Reduced infrastructure cost by up to 70% "
-        "versus traditional cloud providers. Owned the complete product lifecycle from "
-        "problem definition and product vision through MVP and go-to-market. "
-        "Translated ambiguous enterprise problems into scalable AI solutions. "
-        "Led a 12-member cross-functional team. Onboarded enterprise clients including "
-        "ICICI Bank and Abu Dhabi Bank during the MVP phase. Conducted user research "
-        "and market analysis to identify unmet needs and product-market fit. Designed "
-        "user journeys, wireframes, sprint planning, and prioritisation frameworks.\n\n"
+        "blockchain-based data security and distributed compute nodes. Reduced "
+        "infrastructure cost by up to 70% versus traditional cloud providers. Owned "
+        "the complete product lifecycle from problem definition to MVP and GTM. Led a "
+        "12-member cross-functional team. Onboarded enterprise clients including ICICI "
+        "Bank and Abu Dhabi Bank during the MVP phase. Built the hackathon creation "
+        "flow and an AI-powered evaluation framework that automatically scored and "
+        "ranked AI/ML model submissions, replacing subjective manual judging with "
+        "consistent, scalable evals.\n\n"
 
-        "Second Brain AI (Insurance AI — Ongoing 0 to 1 Product):\n"
+        "Product 3 — Second Brain AI (Insurance AI fraud detection, ongoing, built at SmartSense):\n"
         "Building an AI-powered fraud detection platform using RAG, Machine Learning, "
-        "and Knowledge Graphs to detect anomalies in insurance claims. Building a "
-        "document intelligence system for claims processing targeting 90% reduction "
-        "in manual intervention. Developing a plug-and-play AI chatbot that handles "
-        "employee policy and claims queries and integrates with MS Teams and Slack. "
-        "Using AI-assisted development with Claude Code to build core modules "
-        "independently, accelerate MVP timelines, and reduce engineering dependency. "
-        "Executing GTM strategy via LinkedIn outreach and building an AI-driven "
-        "prospecting agent that automates ICP targeting and engagement.\n\n"
+        "and Knowledge Graphs to identify anomalies in insurance claims. Building a "
+        "document intelligence system targeting 90% reduction in manual intervention. "
+        "Developing a plug-and-play AI chatbot that integrates with MS Teams and Slack. "
+        "Using Claude Code for AI-assisted development to accelerate MVP timelines. "
+        "Executing GTM strategy via LinkedIn-led outreach, building early B2B pipeline, "
+        "and developing an AI-driven prospecting agent to automate ICP targeting. "
+        "Shaping product positioning and use-case strategy through competitive analysis "
+        "of insurance fraud detection solutions.\n\n"
 
-        "Foster (0 to 1 Platform):\n"
+        "Product 4 — Foster (0 to 1 EdTech networking platform, built at SmartSense):\n"
         "Multi-sided networking platform connecting colleges, students, and employers "
         "across India. Supported onboarding of 10,000+ colleges and 100+ employers "
-        "within the first year. Drove product direction and execution. Defined market "
-        "entry strategy, feature prioritisation, and release roadmap. Leveraged user "
-        "insights, feedback, and performance data to improve engagement. Collaborated "
-        "on pricing strategy and long-term roadmap to influence revenue and retention.\n\n"
+        "within the first year. Defined market entry strategy, feature prioritisation, "
+        "and release roadmap.\n\n"
 
-        "AI Automation and POCs:\n"
-        "Built an AI-driven CRM automation pipeline using n8n and GPT that reduced "
-        "manual effort by 40% and improved lead management efficiency. Developed an "
-        "LLM-based lead generation system that identifies and qualifies prospects. "
-        "Built an AI voice assistant POC that handles inbound calls and enabled "
-        "successful client onboarding.\n\n"
+        "AI Automation and POCs (built at SmartSense):\n"
+        "Led two PoCs that each converted into a signed development contract: a "
+        "multi-agent voice agent for a sports club in New Zealand, and a multi-agent "
+        "orchestrator workspace-booking chatbot for Upflex. Daily use of Claude "
+        "(Skills, Subagents), ChatGPT, Claude Design, Lovable, and Figma Make to "
+        "accelerate PRDs, user stories, and rapid prototyping. Independently builds "
+        "AI web apps, AI agents, and React plus Python modules with Claude Code and "
+        "Codex — idea to working product with minimal engineering dependency. Built "
+        "an AI-driven CRM automation pipeline using n8n and GPT, reducing manual "
+        "effort by 40%. Developed an LLM-based lead generation system.\n\n"
 
-        "Early Career — Engineering (Green Power International):\n"
-        "Worked on a 572 km railway electrification project. Managed site execution "
-        "and vendor coordination. Supported procurement, ERP-based planning, and "
-        "manpower management. Worked with senior leadership on planning and billing. "
-        "Gained a strong foundation in structured project management.\n\n"
+        "== Green Power International (Jan 2017 – Feb 2019) ==\n\n"
+        "Role: Engineer. Worked on a 572 km railway electrification project. Managed "
+        "site execution and vendor coordination. Supported procurement, ERP-based "
+        "planning, and manpower management. Gained a strong foundation in structured "
+        "project management.\n\n"
 
         "EDUCATION:\n"
         "MBA from IIM Nagpur (2020 to 2022). "
@@ -140,13 +168,23 @@ SYSTEM_MESSAGE = {
 
         "SKILLS:\n"
         "Product: Product Vision and Strategy, Roadmapping, Sprint Planning, Agile, "
-        "Scrum, Feature Prioritisation, Customer Discovery, KPIs, SDLC.\n"
-        "AI: Generative AI, RAG Systems, AI Agents, LLMs, NLP, TTS, STT.\n"
+        "Scrum, Feature Prioritisation, Customer Discovery, KPIs, SDLC, "
+        "Prototyping Tools including Figma Make for AI Prototyping.\n"
+        "AI: Generative AI, RAG Systems, AI Agents, Voice Agents, AI Chatbots, LLMs, "
+        "Speech Models (TTS and STT), Machine Learning, NLP, "
+        "AI Coding with Anthropic Claude Code and OpenAI Codex.\n"
         "Technical: Python, React, HTML, CSS, JavaScript, SQL, APIs, Databases, "
-        "System Design, Data Analytics.\n"
+        "System Design, Data Analytics, Azure AI Microsoft Foundry, "
+        "Google Ads and Analytics, Keywords Research, WordPress.\n"
         "Tools: JIRA, Azure DevOps, Figma, Miro, Excel, PowerPoint, Tableau.\n"
         "Soft Skills: Leadership, Team Management, Stakeholder Management, Strategic "
-        "Thinking, Decision Making, Client Management.\n\n"
+        "Thinking, Decision Making, Client Management, Cross-functional Leadership.\n\n"
+
+        "CERTIFICATIONS:\n"
+        "Masters Union — Product Management. "
+        "KPMG — Lean Six Sigma Green Belt. "
+        "ISCEA — Certified Supply Chain Analyst. "
+        "SQL Fundamentals — MySQL.\n\n"
 
         "CONTACT:\n"
         "Email: shubhanker55@gmail.com\n"
@@ -158,7 +196,49 @@ SYSTEM_MESSAGE = {
         "- For every answer include what was built, why it mattered, and the impact.\n"
         "- If unclear, ask for clarification. If irrelevant, redirect politely.\n"
         "- Be professional, confident, and friendly — never robotic.\n"
-        "- End most replies with a natural follow-up question or CTA."
+        "- End most replies with a natural follow-up question or CTA.\n\n"
+
+        "FOLLOW-UP SUGGESTIONS (apply to ALL responses):\n"
+        "- After EVERY response, append 2-3 short follow-up questions a recruiter might ask next.\n"
+        "- Base them on what was just discussed — make them specific, not generic.\n"
+        "- Keep each question under 12 words. Direct and recruiter-friendly. Plain ASCII only — no arrows, dashes, or special symbols.\n"
+        "- Output them immediately after your response text (and after %%SCORECARD%% if present).\n"
+        "- Each question on its own line, NO brackets or numbering. Output EXACTLY:\n"
+        "%%SUGGESTIONS%%\n"
+        "Write question 1 here\n"
+        "Write question 2 here\n"
+        "Write question 3 here\n"
+        "%%END_SUGGESTIONS%%\n"
+        "- These are display-only chips — NEVER say them aloud. Never include them in your voice text.\n\n"
+
+        "JD ANALYSIS RULES:\n"
+        "- When a recruiter shares a job description, analyze Shubhanker's fit for the role.\n"
+        "- Write 3-4 sentences of natural, conversational fit analysis for voice — NO markdown or bullets.\n"
+        "- End the voice text by inviting the recruiter to schedule a call.\n"
+        "- Never say 'Based on the job description' — jump straight into the analysis.\n"
+        "- IMMEDIATELY after your voice text, output the scorecard block below.\n"
+        "- Output each field on its OWN LINE. Do NOT put all fields on one line.\n"
+        "- Replace every <placeholder> with the actual value. Do NOT output angle brackets.\n"
+        "- Use honest assessments — base scores on actual JD requirements vs Shubhanker's real profile.\n"
+        "- For match_1 through match_5: pick the 5 most important JD requirements and map each to Shubhanker's specific evidence.\n"
+        "- Format for match fields: 'Requirement Label | Specific evidence with metrics from his profile'\n"
+        "- Output the block EXACTLY as shown, with %%END_SCORECARD%% on its own line at the end:\n\n"
+        "%%SCORECARD%%\n"
+        "overall_match:<integer 0-100>\n"
+        "skills_match:<integer 0-100>\n"
+        "domain_match:<integer 0-100 for industry/domain alignment>\n"
+        "leadership_score:<integer 0-100 for leadership/team fit>\n"
+        "experience_years:<e.g. 6+ yrs total, 4+ in PM>\n"
+        "domain_alignment:<e.g. Enterprise AI — Direct Match>\n"
+        "top_matched_skills:<comma-separated skills from JD that Shubhanker has>\n"
+        "key_strength:<one short phrase — his single biggest differentiator for this role>\n"
+        "gap:<one short phrase or None>\n"
+        "match_1:<Requirement Label> | <Specific evidence with metrics>\n"
+        "match_2:<Requirement Label> | <Specific evidence with metrics>\n"
+        "match_3:<Requirement Label> | <Specific evidence with metrics>\n"
+        "match_4:<Requirement Label> | <Specific evidence with metrics>\n"
+        "match_5:<Requirement Label> | <Specific evidence with metrics>\n"
+        "%%END_SCORECARD%%\n"
     )
 }
 
@@ -229,6 +309,17 @@ class VoiceSessionManager:
         # Calendly cache (fetched once per server lifetime)
         self._calendly_user_uri:   str | None        = None
         self._calendly_event_types: list[dict] | None = None
+
+    # ── greeting ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def get_greeting_text() -> str:
+        return (
+            "Hello! Welcome to Shubhanker Goswami's portfolio. "
+            "I'm Cogni, his AI voice assistant. "
+            "I can tell you about his work experience, achievements, education, and contact details. "
+            "You can also paste a job description and I'll assess how well he fits the role. "
+            "Go ahead — tap the microphone and ask me anything!"
+        )
 
     # ── session CRUD ──────────────────────────────────────────────────────────
     async def get_or_create(self, session_id: str) -> VoiceSession:
@@ -439,17 +530,167 @@ class VoiceSessionManager:
                 data = await resp.json()
                 return data.get("text", "").strip()
 
+    # ── Message window helper ─────────────────────────────────────────────────
+    @staticmethod
+    def _build_messages(session: VoiceSession) -> list:
+        """Return system prompt + last 10 messages (rolling window)."""
+        if len(session.chat_history) > 11:
+            return [session.chat_history[0]] + session.chat_history[-10:]
+        return list(session.chat_history)
+
+    # ── Streaming LLM + sentence yielder ──────────────────────────────────────
+    async def stream_response(self, session: VoiceSession, user_text: str):
+        """
+        Async generator — yields voice-ready sentences as they form.
+
+        • Streams GPT tokens; yields a sentence the moment it ends with .!?
+        • If GPT triggers tool calls, executes them first, then splits the
+          final reply into sentences and yields each one.
+        • Updates session history in a finally block (always runs).
+        """
+        session.chat_history.append({"role": "user", "content": user_text})
+        messages   = self._build_messages(session)
+
+        # Append reminder to last user message in API call only (not in stored history)
+        # so gpt-4o-mini reliably appends the %%SUGGESTIONS%% block
+        _SUGG_REMINDER = "\n\n[After your reply, append the %%SUGGESTIONS%% block as instructed.]"
+        if messages and messages[-1].get("role") == "user":
+            messages = list(messages)
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] + _SUGG_REMINDER}
+
+        full_reply = ""
+        text_buf   = ""
+        tool_idx: dict[int, dict] = {}
+        finish_reason = None
+
+        oai_hdrs = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type":  "application/json",
+        }
+        payload = {
+            "model":       "gpt-4o-mini",
+            "messages":    messages,
+            "tools":       TOOLS,
+            "tool_choice": "auto",
+            "temperature": 0.55,
+            "max_tokens":  500,
+            "stream":      True,
+        }
+
+        try:
+            async with aiohttp.ClientSession() as http:
+                async with http.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers=oai_hdrs, json=payload
+                ) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"OpenAI {resp.status}: {await resp.text()}")
+
+                    async for raw in resp.content:
+                        line = raw.decode("utf-8").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        chunk_str = line[6:]
+                        if chunk_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(chunk_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        choice = chunk["choices"][0]
+                        delta  = choice.get("delta", {})
+                        finish_reason = choice.get("finish_reason") or finish_reason
+
+                        # ── Accumulate text and yield complete sentences ───────
+                        if delta.get("content"):
+                            text_buf += delta["content"]
+                            offset = 0
+                            while True:
+                                m = _SENT_BOUND.search(text_buf, offset)
+                                if not m:
+                                    break
+                                candidate = text_buf[:m.start() + 1].strip()
+                                if len(candidate) >= _MIN_SENT:
+                                    full_reply += (" " if full_reply else "") + candidate
+                                    text_buf = text_buf[m.end():]
+                                    offset   = 0
+                                    yield candidate
+                                else:
+                                    offset = m.end()   # skip short fragment, search further
+
+                        # ── Accumulate tool call deltas ────────────────────────
+                        for tc in delta.get("tool_calls", []):
+                            i = tc.get("index", 0)
+                            if i not in tool_idx:
+                                tool_idx[i] = {"id": "", "name": "", "arguments": ""}
+                            if tc.get("id"):
+                                tool_idx[i]["id"] = tc["id"]
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                tool_idx[i]["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                tool_idx[i]["arguments"] += fn["arguments"]
+
+            # ── Post-stream: tool calls or leftover text ──────────────────────
+            if tool_idx:
+                # Build and execute tool calls, then get non-streaming final reply
+                tc_list = [
+                    {"id": tc["id"], "type": "function",
+                     "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in (tool_idx[k] for k in sorted(tool_idx))
+                ]
+                messages.append({"role": "assistant", "content": None, "tool_calls": tc_list})
+
+                for tc in tc_list:
+                    result = await self._run_tool(
+                        tc["function"]["name"], tc["function"]["arguments"])
+                    print(f"[Voice/stream] tool {tc['function']['name']} → {result[:120]}")
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"], "content": result
+                    })
+
+                async with aiohttp.ClientSession() as http:
+                    async with http.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers=oai_hdrs,
+                        json={"model": "gpt-4o-mini", "messages": messages,
+                              "temperature": 0.55, "max_tokens": 500}
+                    ) as resp:
+                        if resp.status != 200:
+                            raise RuntimeError(f"OpenAI tool-reply {resp.status}: {await resp.text()}")
+                        data = await resp.json()
+                        full_reply = data["choices"][0]["message"].get("content") or ""
+
+                # Split final tool-response reply into sentences and yield each
+                for s in [p.strip() for p in _SENT_BOUND.split(full_reply) if p.strip()]:
+                    yield s
+
+            elif text_buf.strip():
+                # Trailing text with no sentence-ending whitespace (last sentence)
+                remaining = text_buf.strip()
+                full_reply += (" " if full_reply else "") + remaining
+                yield remaining
+
+        finally:
+            if full_reply:
+                session.chat_history.append({"role": "assistant", "content": full_reply})
+            session.last_active = time.time()
+            print(f"[Voice/stream] {session.session_id[:8]} | {user_text[:50]!r} → {full_reply[:80]!r}")
+
     # ── LLM — GPT-4o mini with tool-call loop ────────────────────────────────
     async def get_llm_response(self, session: VoiceSession,
-                               user_text: str) -> str:
+                               user_text: str, max_tokens: int = 250) -> str:
         session.chat_history.append({"role": "user", "content": user_text})
 
         # Rolling window: system prompt + last 10 messages (5 turns)
-        messages = (
-            [session.chat_history[0]] + session.chat_history[-10:]
-            if len(session.chat_history) > 11
-            else list(session.chat_history)
-        )
+        messages = self._build_messages(session)
+
+        # Inject reminder into last user message so model appends %%SUGGESTIONS%%
+        _SUGG_REMINDER = "\n\n[After your reply, append the %%SUGGESTIONS%% block as instructed.]"
+        if messages and messages[-1].get("role") == "user":
+            messages = list(messages)
+            messages[-1] = {**messages[-1], "content": messages[-1]["content"] + _SUGG_REMINDER}
 
         oai_headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -467,7 +708,7 @@ class VoiceSessionManager:
                 "tools":       TOOLS,
                 "tool_choice": "auto",
                 "temperature": 0.55,
-                "max_tokens":  250,
+                "max_tokens":  max_tokens,
             }
 
             async with aiohttp.ClientSession() as http:

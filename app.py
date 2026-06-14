@@ -1,8 +1,15 @@
 import os
+import re
 import sys
 import json
 import subprocess
 import asyncio
+
+# Force UTF-8 stdout/stderr so Windows charmap encoding never raises UnicodeEncodeError
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse
@@ -19,7 +26,11 @@ voice_manager = VoiceSessionManager()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://portfolio.beingcogni.com/"],  # Or specify your frontend URL like "http://localhost:3000"
+    allow_origins=[
+        "https://portfolio.beingcogni.com",   # production (no trailing slash — matches browser Origin header)
+        "http://localhost:5173",               # Vite dev server
+        "http://localhost:4173",               # Vite preview
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,6 +44,12 @@ async def root():
 @app.head("/")
 async def head_root():
     return {"message": "Service is running!"}
+
+
+@app.get("/ping")
+async def ping():
+    """Lightweight warmup endpoint — called by the frontend on page load to wake Render free-tier instance."""
+    return {"status": "pong"}
 
 @app.get("/healthcheck")
 async def healthcheck():
@@ -111,35 +128,101 @@ async def voice_websocket_endpoint(websocket: WebSocket):
                 await send_json({"type": "transcript", "text": transcript})
                 await send_telegram_message(f"[Voice] User: {transcript}")
 
-                # 2. LLM
+                # 2. Stream LLM → sentence TTS — first audio arrives after ~1st sentence
                 try:
-                    reply = await voice_manager.get_llm_response(session, transcript)
+                    full_reply = ""
+                    async for sentence in voice_manager.stream_response(session, transcript):
+                        if not sentence:
+                            continue
+                        full_reply += (" " if full_reply else "") + sentence
+                        # Notify FE of each sentence for progressive display
+                        await send_json({"type": "response_text_chunk", "text": sentence})
+                        # Skip TTS for display-only blocks (%%SUGGESTIONS%% etc.)
+                        if '%%' in sentence:
+                            continue
+                        # TTS this sentence immediately and stream audio
+                        audio_mp3 = await voice_manager.synthesize(sentence)
+                        await websocket.send_bytes(audio_mp3)
+                    # Send complete text so FE can do PDF highlighting
+                    if full_reply:
+                        await send_json({"type": "response_text", "text": full_reply})
+                        await send_telegram_message(f"[Voice] Bot: {full_reply}")
                 except Exception as exc:
-                    print(f"[Voice] LLM error: {exc}")
-                    await send_json({"type": "error", "stage": "llm", "message": str(exc)})
+                    print(f"[Voice] stream error: {exc}")
+                    await send_json({"type": "error", "stage": "stream", "message": str(exc)})
                     continue
 
-                # Send text response so FE can display it
-                await send_json({"type": "response_text", "text": reply})
-                await send_telegram_message(f"[Voice] Bot: {reply}")
-
-                # 3. TTS
-                try:
-                    audio_mp3 = await voice_manager.synthesize(reply)
-                except Exception as exc:
-                    print(f"[Voice] TTS error: {exc}")
-                    await send_json({"type": "error", "stage": "tts", "message": str(exc)})
-                    continue
-
-                # Send audio as binary frame — FE plays it
-                await websocket.send_bytes(audio_mp3)
-
-            # ── text frame — optional ping / control messages ─────────────────
+            # ── text frame — ping / greeting / jd_text control messages ─────────
             elif message.get("text"):
                 try:
                     ctrl = json.loads(message["text"])
+
                     if ctrl.get("type") == "ping":
                         await send_json({"type": "pong"})
+
+                    elif ctrl.get("type") == "greeting":
+                        # Send welcome greeting — no LLM, just TTS
+                        greeting = voice_manager.get_greeting_text()
+                        await send_json({"type": "response_text", "text": greeting})
+                        try:
+                            audio_mp3 = await voice_manager.synthesize(greeting)
+                            await websocket.send_bytes(audio_mp3)
+                        except Exception as exc:
+                            print(f"[Voice] greeting TTS error: {exc}")
+
+                    elif ctrl.get("type") == "text_query":
+                        query = ctrl.get("text", "").strip()
+                        if query:
+                            await send_json({"type": "transcript", "text": query})
+                            await send_telegram_message(f"[Voice/Query] {query}")
+                            try:
+                                full_reply = ""
+                                async for sentence in voice_manager.stream_response(session, query):
+                                    if not sentence:
+                                        continue
+                                    full_reply += (" " if full_reply else "") + sentence
+                                    await send_json({"type": "response_text_chunk", "text": sentence})
+                                    # Skip TTS for display-only blocks (%%SUGGESTIONS%% etc.)
+                                    if '%%' in sentence:
+                                        continue
+                                    audio_mp3 = await voice_manager.synthesize(sentence)
+                                    await websocket.send_bytes(audio_mp3)
+                                if full_reply:
+                                    await send_json({"type": "response_text", "text": full_reply})
+                            except Exception as exc:
+                                print(f"[Voice] text query error: {exc}")
+                                await send_json({"type": "error", "stage": "query", "message": str(exc)})
+
+                    elif ctrl.get("type") == "jd_text":
+                        jd = ctrl.get("text", "").strip()
+                        if jd:
+                            user_message = (
+                                "A recruiter has shared the following job description. "
+                                "Analyze how well Shubhanker Goswami fits this role — "
+                                "3-4 conversational voice sentences, then append the %%SCORECARD%% block "
+                                "as instructed in your rules:\n\n" + jd
+                            )
+                            await send_telegram_message(f"[Voice/JD] {jd[:300]}")
+                            try:
+                                # Non-streaming for JD — allows scorecard extraction before TTS
+                                full_reply = await voice_manager.get_llm_response(
+                                    session, user_message, max_tokens=700
+                                )
+                                if full_reply:
+                                    # Strip all display-only blocks (scorecard, suggestions) before TTS
+                                    voice_text = re.sub(
+                                        r'%%\w+%%.*', '', full_reply, flags=re.DOTALL
+                                    ).strip()
+                                    if voice_text:
+                                        audio_mp3 = await voice_manager.synthesize(voice_text)
+                                        await websocket.send_bytes(audio_mp3)
+                                    # Send full reply (scorecard included) for chat display
+                                    await send_json({"type": "response_text", "text": full_reply})
+                                    await send_telegram_message(f"[Voice/JD Bot] {full_reply}")
+                            except Exception as exc:
+                                print(f"[Voice] JD analysis error: {exc}")
+                                await send_json({"type": "error", "stage": "jd", "message": str(exc)})
+
                 except Exception:
                     pass  # ignore malformed text
 
